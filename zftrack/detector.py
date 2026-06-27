@@ -50,7 +50,7 @@ def _patch_intensity(gray: np.ndarray, x: float, y: float, r: int = 4) -> float:
     return float(gray[y0:y1, x0:x1].mean())
 
 
-def _shape_features(contour: np.ndarray, gray: np.ndarray):
+def _shape_features(contour: np.ndarray):
     """Principal-axis orientation, length/width and the two body tips."""
     pts = contour.reshape(-1, 2).astype(np.float32)
     if len(pts) < 2:
@@ -147,7 +147,7 @@ class BlobDetector:
                 cx = moments["m10"] / moments["m00"]
                 cy = moments["m01"] / moments["m00"]
 
-            length, width, axis_deg, end_a, end_b = _shape_features(contour, gray)
+            length, width, axis_deg, end_a, end_b = _shape_features(contour)
             ia = _patch_intensity(gray, *end_a)
             ib = _patch_intensity(gray, *end_b)
 

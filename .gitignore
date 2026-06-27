@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# pytest
+.pytest_cache/
+
+# Tracker outputs (generated next to input videos)
+*_tracked.mp4
+*_tracks.csv
+*_summary.csv
+*_timeseries.csv
+*_phases.csv
+*_heatmap.png
+*_trajectories.png
+*_actogram.png

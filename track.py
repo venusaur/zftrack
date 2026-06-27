@@ -86,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Frames a fish may be unseen before retirement to re-ID buffer")
     g.add_argument("--min-hits", type=int, default=3,
                    help="Detections before a track is confirmed (noise filter)")
+    g.add_argument("--num-fish", type=int, default=None,
+                   help="Known fish count: cap IDs at this number (arena mode). "
+                        "Extra detections revive an existing ID instead of "
+                        "spawning a new one — fixes overlap-induced ID inflation")
     g.add_argument("--no-reid", action="store_true",
                    help="Disable reviving lost IDs (reduces ID switches when on)")
     g.add_argument("--no-merge-aware", action="store_true",
@@ -97,7 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--sleep-seconds", type=float, default=60.0,
                    help="Continuous inactivity (s) scored as sleeping")
     g.add_argument("--activity-px", type=float, default=None,
-                   help="Path length (px) per window below which a fish is inactive")
+                   help="Spread radius (px) within which a fish counts as inactive "
+                        "over the activity window")
     g.add_argument("--activity-window", type=float, default=1.0,
                    help="Activity window length in seconds")
 
@@ -152,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         max_distance=args.max_distance,
         max_disappeared=args.max_disappeared,
         min_hits=args.min_hits,
+        expected_count=args.num_fish,
         reid=not args.no_reid,
         merge_aware=not args.no_merge_aware,
         merge_area_factor=args.merge_area_factor,

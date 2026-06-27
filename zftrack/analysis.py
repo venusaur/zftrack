@@ -62,10 +62,13 @@ def detect_phases(brightness, fps: float, min_phase_s: float = 20.0):
     if (hi - lo) < 0.06 * max(np.median(b), 1.0):
         return [(0, n - 1, "constant")]
 
-    # Smooth over a few seconds so flicker doesn't manufacture phases.
+    # Smooth over a few seconds so flicker doesn't manufacture phases. Pad with
+    # edge values (not zeros) so the moving average isn't dragged toward 0 at the
+    # start/end, which would invent a spurious phase in the first/last seconds.
     win = max(1, int(fps * 5))
     kernel = np.ones(win) / win
-    bs = np.convolve(b, kernel, mode="same")
+    pad = win // 2
+    bs = np.convolve(np.pad(b, pad, mode="edge"), kernel, mode="same")[pad:pad + n]
     thr = 0.5 * (lo + hi)
     labels = np.where(bs >= thr, "light", "dark")
 
@@ -76,14 +79,23 @@ def detect_phases(brightness, fps: float, min_phase_s: float = 20.0):
             start = i
     phases.append([start, n - 1, labels[-1]])
 
-    # Absorb phases shorter than min_phase_s into the preceding one.
+    # Absorb phases shorter than min_phase_s. Normally fold into the preceding
+    # phase; a too-short *leading* phase (no predecessor) folds into the next one.
     min_frames = min_phase_s * fps
     merged: list[list] = []
     for p in phases:
-        if merged and (p[1] - p[0] + 1) < min_frames:
+        too_short = (p[1] - p[0] + 1) < min_frames
+        if too_short and merged:
             merged[-1][1] = p[1]
+        elif too_short and not merged:
+            p[2] = None              # mark start to inherit the next phase's label
+            merged.append(p)
+        elif merged and merged[-1][2] is None:
+            merged[-1][1], merged[-1][2] = p[1], p[2]    # adopt next label
         else:
             merged.append(p)
+    if merged and merged[-1][2] is None:                 # only one phase, all short
+        merged[-1][2] = "constant"
     if len(merged) == 1:
         merged[0][2] = "constant"
     return [(s, e, lab) for s, e, lab in merged]

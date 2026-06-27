@@ -28,6 +28,9 @@ python track.py video.mp4
 
 # Multi-well sleep assay (10-min plate recording)
 python track.py fish.mp4 --mode plate
+
+# Open arena with a known number of fish (caps IDs, avoids overlap inflation)
+python track.py video.mp4 --num-fish 4
 ```
 
 Each run writes, next to the input (or use `-o` / `-c`):
@@ -44,9 +47,14 @@ Each run writes, next to the input (or use `-o` / `-c`):
 ### Sleep detection & analytics
 
 A fish is scored **sleeping** after **`--sleep-seconds` (default 60) of
-continuous inactivity** — its path length over the trailing 1 s window stays
-below `--activity-px`. Written per frame (`sleeping` column) and summarised per
-fish (`sleep_total_s`, `sleep_bouts`, `longest_sleep_s`).
+continuous inactivity** — it stays within an `--activity-px` radius over the
+trailing 1 s window. Inactivity is measured as the *spatial spread* of the
+fish's (median-filtered) positions, not cumulative path length: path length sums
+every step, so it accumulates sub-pixel detection jitter and grows with frame
+rate (at 30 fps a motionless fish accrues ~15 px of fake "movement" from noise),
+which would suppress real sleep. Spread is frame-rate independent and robust to
+isolated detection outliers. Written per frame (`sleeping` column) and
+summarised per fish (`sleep_total_s`, `sleep_bouts`, `longest_sleep_s`).
 
 The analysis also bins the recording (`--bin-seconds`, default 60) into the
 time-series and actogram, and splits it into **light/dark phases** — auto-detected
@@ -59,7 +67,7 @@ fish and as a group **mean ± SEM**.
 > `--sleep-seconds 5` to demo the labelling.
 
 Key flags (`python track.py -h` for all): `--threshold`, `--min-area/--max-area`,
-`--max-disappeared`, `--sleep-seconds`, `--activity-px`, `--bin-seconds`,
+`--max-disappeared`, `--num-fish`, `--sleep-seconds`, `--activity-px`, `--bin-seconds`,
 `--phases`, `--px-per-mm` (real-world units), `--no-reid`,
 `--no-video/--no-csv/--no-analyze`.
 
@@ -98,11 +106,48 @@ back to the darker — eyed — body tip). In `plate` mode `id` is the well numb
    map. Thigmotaxis is scored against the shared arena (arena mode) or each
    fish's own well (plate mode).
 
+## Tests
+
+Unit tests cover detection, tracking (ID stability, re-ID, sleep scoring), well
+finding, background estimation, arena fitting and the analysis layer. They use
+synthetic frames/videos, so no sample footage is required.
+
+```bash
+source .venv/bin/activate
+pip install pytest
+pytest
+```
+
+## Hardware (CAD models)
+
+The `models/` folder holds the CAD for the physical imaging rig that produces the
+footage this tracker consumes.
+
+**`models/current/`** — the rig in use:
+
+| File | Format | What it is |
+|------|--------|------------|
+| `Zebra Fish Box Assembly` | `.step`, `.stl` | The imaging enclosure — top-down camera box that holds the plate and controls lighting for the recordings. |
+| `ZebraBox Mesh Plate` | `.step`, `.stl` | The multi-well mesh plate that seats the larvae (one fish per well for the `plate` sleep assay). |
+
+Each model is provided as a `.step` (parametric, for editing in CAD) and a `.stl`
+(mesh, for 3D printing / viewing).
+
+**`models/future/`** — parts for a planned motorized stage (SolidWorks `.SLDPRT` /
+`.SLDASM`): a HIWIN MGN9H linear slider, 20×20 extrusion frame, bed, interface
+plate, and brackets — for automating positioning in a later revision.
+
 ## Known limitations
 
 * **Overlapping fish (arena).** Two fish merging into one blob can swap or
   restart an ID when they separate — the limit of markerless tracking without an
-  identity/appearance model.
+  identity/appearance model. Two mitigations are built in: a re-ID *rescue* pass
+  revives a coasting track when its fish reappears just beyond the per-frame
+  match radius, and **`--num-fish N`** caps the total IDs at the known fish count
+  (extra detections revive an existing ID instead of spawning a new one). On the
+  4-fish sample clip this takes the ID count from ~14 down to 4. It cannot
+  *separate* two fish that stay merged — if a pair overlaps for most of the clip,
+  the second fish is only tracked while it is individually visible.
 * **Never-moving fish (plate).** A larva that does not move *at all* for the
   whole recording stays in the max background and cannot be segmented (it is also,
   trivially, asleep). Indistinguishable from a fixed speck of debris.
