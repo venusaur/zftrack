@@ -38,6 +38,18 @@ def _default_output(input_path: str, suffix: str, ext: str) -> str:
     return f"{base}{suffix}{ext}"
 
 
+def _parse_phases(spec: str | None, fps: float):
+    """Parse 'light:0-300,dark:300-600' (seconds) -> [(start_f, end_f, label)]."""
+    if not spec:
+        return None
+    phases = []
+    for part in spec.split(","):
+        label, _, span = part.strip().partition(":")
+        start_s, _, end_s = span.partition("-")
+        phases.append((int(float(start_s) * fps), int(float(end_s) * fps), label.strip()))
+    return phases
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Track zebrafish in a top-down arena video.",
@@ -94,6 +106,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Pixels per mm for real-world units (default: pixel units)")
     g.add_argument("--center-frac", type=float, default=0.5,
                    help="Central-zone radius as a fraction of arena radius")
+    g.add_argument("--bin-seconds", type=float, default=60.0,
+                   help="Time-bin size (s) for the sleep time series / actogram")
+    g.add_argument("--phases", default=None,
+                   help="Manual light/dark phases in seconds, e.g. "
+                        "'light:0-300,dark:300-600' (default: auto-detect)")
 
     g = p.add_argument_group("annotation")
     g.add_argument("--no-trail", action="store_true", help="Do not draw motion trails")
@@ -172,13 +189,28 @@ def main(argv: list[str] | None = None) -> int:
             px_per_mm=args.px_per_mm,
             center_radius_frac=args.center_frac,
             wells=summary.get("wells"),
+            brightness=summary.get("brightness"),
+            bin_seconds=args.bin_seconds,
+            phases=_parse_phases(args.phases, summary["fps"]),
         )
         if result["summary_csv"]:
-            print(f"  summary: {result['summary_csv']}  ({result['n_fish']} fish)")
+            print(f"  summary:    {result['summary_csv']}  ({result['n_fish']} fish)")
         if result["heatmap_png"]:
-            print(f"  heatmap: {result['heatmap_png']}")
+            print(f"  heatmap:    {result['heatmap_png']}")
         if result["trajectories_png"]:
-            print(f"  paths:   {result['trajectories_png']}")
+            print(f"  paths:      {result['trajectories_png']}")
+        if result.get("timeseries_csv"):
+            print(f"  timeseries: {result['timeseries_csv']}")
+        if result.get("actogram_png"):
+            print(f"  actogram:   {result['actogram_png']}")
+        if result.get("phases_csv"):
+            phase_labels = ", ".join(f"{lab} {(e-s+1)/summary['fps']:.0f}s"
+                                     for s, e, lab in result["phases"])
+            print(f"  phases:     {result['phases_csv']}  [{phase_labels}]")
+        for lab, g in (result.get("group") or {}).items():
+            m, sem = g["sleep_pct"]
+            print(f"    group {lab}: {g['n_fish']} fish, sleep {m}%+/-{sem} "
+                  f"(bouts {g['sleep_bouts'][0]}+/-{g['sleep_bouts'][1]})")
     return 0
 
 
