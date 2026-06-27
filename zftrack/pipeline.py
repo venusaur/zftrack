@@ -36,6 +36,7 @@ class TrackerConfig:
     max_distance: float = 120.0
     max_disappeared: int = 48
     min_hits: int = 3
+    expected_count: int | None = None  # known fish count: cap IDs, never exceed it
     merge_aware: bool = False
     merge_area_factor: float = 1.8
     # Re-identification (revive lost IDs instead of spawning new ones)
@@ -188,7 +189,10 @@ def process_video(
         tracker = PlateTracker(
             wells, fps=fps, background=background,
             threshold=max(8, config.threshold - 10),
-            min_area=max(4.0, config.min_area * 0.4),
+            # Keep the per-well floor above the noise-speck cluster (~5-15 px):
+            # tiny far-flung blobs are sensor noise, not the larva, and tracking
+            # them inflates distance and defeats sleep detection.
+            min_area=max(20.0, config.min_area * 0.4),
             max_area=max(config.max_area, 1500.0),
             activity_window_s=config.activity_window_s,
             activity_px=config.activity_px,
@@ -199,6 +203,7 @@ def process_video(
             max_distance=config.max_distance,
             max_disappeared=config.max_disappeared,
             min_hits=config.min_hits,
+            expected_count=config.expected_count,
             merge_aware=config.merge_aware,
             merge_area_factor=config.merge_area_factor,
             reid=config.reid,

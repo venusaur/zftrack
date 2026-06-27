@@ -133,7 +133,7 @@ def detect_in_well(gray: np.ndarray, background: np.ndarray,
     else:
         cx, cy = m["m10"] / m["m00"], m["m01"] / m["m00"]
 
-    length, width, axis_deg, end_a, end_b = _shape_features(contour, gray)
+    length, width, axis_deg, end_a, end_b = _shape_features(contour)
     return Detection(
         centroid=(cx, cy), bbox=(bx, by, bw, bh), area=area, contour=contour,
         length=length, width=width, axis_deg=axis_deg, end_a=end_a, end_b=end_b,
@@ -183,8 +183,9 @@ class PlateTracker:
                     track.update(det, frame_idx)
                 visible.append(track)
             elif track is not None:
-                track.predict()
-                track.mark_missed(frame_idx)
+                # Undetected = resting larva (too still to segment), not a fish
+                # that moved away: hold position so sleep can accrue.
+                track.hold(frame_idx)
 
             if self.tracks[wi] is not None:
                 self.tracks[wi].update_activity(

@@ -46,6 +46,16 @@ _PALETTE = [
 ]
 
 
+def _median3(a: list[float]) -> list[float]:
+    """3-point median filter; endpoints unchanged. Removes 1-sample spikes."""
+    if len(a) < 3:
+        return a
+    out = a[:]
+    for k in range(1, len(a) - 1):
+        out[k] = sorted(a[k - 1:k + 2])[1]
+    return out
+
+
 def _new_kalman(cx: float, cy: float) -> cv2.KalmanFilter:
     """Constant-velocity Kalman filter initialised at (cx, cy)."""
     kf = cv2.KalmanFilter(4, 2)
@@ -107,7 +117,6 @@ class Track:
         self._act_window = activity_window
         self._act_positions: deque[tuple[int, float, float]] = deque()
         self.activity_path = 0.0
-        self.is_active = True
         self.inactive_frames = 0
         self.inactive_seconds = 0.0
         self.sleeping = False
@@ -204,6 +213,20 @@ class Track:
         self.centroid = (cx, cy)
         self.history.append((frame_idx, cx, cy, False))
 
+    def hold(self, frame_idx: int) -> None:
+        """Freeze the track at its last seen position with zero velocity.
+
+        For a well-plate fish, "no detection" means the larva is too still to
+        segment (resting) — not that it moved away. Holding position (instead of
+        coasting on the Kalman's last velocity) avoids fabricating activity, so a
+        resting fish correctly accumulates inactivity toward sleep.
+        """
+        sx, sy = self.last_seen
+        self.kf.statePost = np.array([[sx], [sy], [0], [0]], dtype=np.float32)
+        self.centroid = (sx, sy)
+        self.time_since_update = 0
+        self.history.append((frame_idx, sx, sy, False))
+
     def mark_merged(self, blob: Detection, frame_idx: int) -> None:
         """Park this track on a blob it has merged into with another fish."""
         sx, sy = self.last_seen
@@ -219,24 +242,34 @@ class Track:
                         activity_px: float, sleep_frames: int) -> None:
         """Update continuous-inactivity state and the sleep flag.
 
-        A fish is inactive on this frame if the path length it travelled over the
-        trailing activity window is below ``activity_px``. Continuous inactivity
-        longer than ``sleep_frames`` is scored as sleeping.
+        A fish is inactive on this frame if it stayed within a small region over
+        the trailing activity window — i.e. the spatial *spread* of its positions
+        is below ``activity_px``. Continuous inactivity longer than
+        ``sleep_frames`` is scored as sleeping.
+
+        Spread (excursion from the window's median position) is used rather than
+        cumulative path length: path length sums every step, so it accumulates
+        sub-pixel detection jitter and grows with frame rate (at 30 fps a
+        motionless fish accrues ~15 px of "movement" from noise alone), which
+        wrongly suppresses sleep. Spread is frame-rate independent. Positions are
+        also median-filtered (3-point) to drop single-frame detection outliers.
         """
         self._act_positions.append((frame_idx, self.centroid[0], self.centroid[1]))
         while self._act_positions and self._act_positions[0][0] <= frame_idx - self._act_window:
             self._act_positions.popleft()
 
         pts = list(self._act_positions)
-        path = 0.0
-        for i in range(1, len(pts)):
-            if pts[i][0] == pts[i - 1][0] + 1:
-                path += math.hypot(pts[i][1] - pts[i - 1][1], pts[i][2] - pts[i - 1][2])
-        self.activity_path = path
+        xs = _median3([q[1] for q in pts])
+        ys = _median3([q[2] for q in pts])
+        mx, my = float(np.median(xs)), float(np.median(ys))
+        dists = np.hypot(np.array(xs) - mx, np.array(ys) - my)
+        # 90th-percentile excursion: robust max reach, ignoring a stray outlier.
+        spread = float(np.percentile(dists, 90)) if len(dists) else 0.0
+        self.activity_path = spread
 
         span = pts[-1][0] - pts[0][0] if pts else 0
         have_window = span >= self._act_window * 0.5
-        inactive = have_window and path < activity_px
+        inactive = have_window and spread < activity_px
         self.inactive_frames = self.inactive_frames + 1 if inactive else 0
         self.inactive_seconds = self.inactive_frames / fps if fps else 0.0
         self.sleeping = self.inactive_frames >= sleep_frames
@@ -260,7 +293,9 @@ class MultiObjectTracker:
         activity_window_s: float = 1.0,
         activity_px: float = 30.0,
         sleep_seconds: float = 60.0,
+        expected_count: int | None = None,
     ) -> None:
+        self.expected_count = expected_count
         self.max_distance = max_distance
         self.max_disappeared = max_disappeared
         self.min_hits = min_hits
@@ -292,6 +327,19 @@ class MultiObjectTracker:
 
         matches, unmatched_tracks, unmatched_dets = self._associate(detections)
 
+        # Second chance: a confirmed track that just lost its detection (e.g. a
+        # fish re-emerging from a merge) often reappears beyond ``max_distance``
+        # of its stale prediction. Rescue it under its old ID, using the wider
+        # re-ID gate + appearance check, before any new ID is spawned.
+        if self.reid and unmatched_tracks and unmatched_dets:
+            rescued = self._rescue_coasting(unmatched_tracks, unmatched_dets, detections)
+            if rescued:
+                matches.extend(rescued)
+                done_t = {t for t, _ in rescued}
+                done_d = {d for _, d in rescued}
+                unmatched_tracks = [t for t in unmatched_tracks if t not in done_t]
+                unmatched_dets = [d for d in unmatched_dets if d not in done_d]
+
         for track_idx, det_idx in matches:
             self.tracks[track_idx].update(detections[det_idx], frame_idx)
         self._update_area_estimate(matches, detections)
@@ -308,12 +356,23 @@ class MultiObjectTracker:
                 track.mark_missed(frame_idx)
 
         # New detections: revive a lost track if one fits, else start fresh.
+        # With a known fish count, never exceed it: once at capacity, a leftover
+        # detection force-revives the best lost track instead of spawning a new
+        # ID (and is dropped if there is nothing to revive).
         for det_idx in unmatched_dets:
             det = detections[det_idx]
             revived = self._try_reid(det, frame_idx) if self.reid else None
             if revived is not None:
                 revived.revive(det, frame_idx)
                 self.tracks.append(revived)
+            elif self.expected_count is not None and self._at_capacity():
+                forced = self._best_lost(det, frame_idx)
+                if forced is not None:
+                    self.lost.remove(forced)
+                    forced.revive(det, frame_idx)
+                    self.tracks.append(forced)
+                # else: at capacity with nothing to revive -> drop (noise / merge
+                # split that _rescue_coasting will reclaim under the old ID).
             else:
                 self.tracks.append(
                     Track(self._next_id, det, frame_idx, activity_window=self._act_window)
@@ -383,6 +442,65 @@ class MultiObjectTracker:
             return 0.0
         denom = np.abs(a) + np.abs(b) + 1e-6
         return float(np.mean(np.abs(a - b) / denom))
+
+    def _at_capacity(self) -> bool:
+        """True if confirmed live + lost identities already meet expected_count."""
+        if self.expected_count is None:
+            return False
+        live = sum(1 for t in self.tracks if t.confirmed)
+        return live + len(self.lost) >= self.expected_count
+
+    def _best_lost(self, det: Detection, frame_idx: int):
+        """Nearest lost track by extrapolated position, ignoring the re-ID gates.
+
+        Used only when a known fish count forbids spawning a new ID, so the
+        detection must belong to a fish we already know — take the closest one.
+        """
+        best, best_dist = None, float("inf")
+        for track in self.lost:
+            dt = frame_idx - track.lost_frame
+            ex = track.last_seen[0] + track.lost_velocity[0] * dt
+            ey = track.last_seen[1] + track.lost_velocity[1] * dt
+            dist = math.hypot(det.centroid[0] - ex, det.centroid[1] - ey)
+            if dist < best_dist:
+                best_dist, best = dist, track
+        return best
+
+    def _rescue_coasting(self, unmatched_tracks, unmatched_dets, detections):
+        """Match leftover detections to coasting *confirmed* tracks.
+
+        Bridges the gap between ``max_distance`` (strict, per-frame) and
+        ``reid_max_distance`` (wider) for tracks that are still live but were
+        unmatched this frame, so a fish re-emerging from a merge keeps its ID
+        instead of spawning a new one. Greedy by ascending distance+appearance
+        cost; appearance-gated to avoid stealing a detection that belongs to a
+        genuinely different fish.
+        """
+        cands = []
+        for ti in unmatched_tracks:
+            track = self.tracks[ti]
+            if not track.confirmed:
+                continue
+            px, py = track.predicted_centroid
+            for di in unmatched_dets:
+                det = detections[di]
+                dist = math.hypot(det.centroid[0] - px, det.centroid[1] - py)
+                if dist > self.reid_max_distance:
+                    continue
+                appear = self._appearance_cost(track.descriptor, det.descriptor)
+                if appear > self.reid_appearance_max:
+                    continue
+                cands.append((dist + 200.0 * appear, ti, di))
+
+        cands.sort(key=lambda c: c[0])
+        used_t, used_d, pairs = set(), set(), []
+        for _, ti, di in cands:
+            if ti in used_t or di in used_d:
+                continue
+            used_t.add(ti)
+            used_d.add(di)
+            pairs.append((ti, di))
+        return pairs
 
     def _try_reid(self, det: Detection, frame_idx: int):
         """Return a lost track that best matches ``det``, or None."""
